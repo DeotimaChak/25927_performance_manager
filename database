@@ -1,0 +1,99 @@
+-- Ensure you are connected to the 'Performance_management' database before running this script.
+
+-- Table for Users (Managers and Employees)
+-- Each user has a role to distinguish between a manager and an employee.
+CREATE TABLE users (
+    user_id SERIAL PRIMARY KEY,
+    full_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    user_role VARCHAR(50) NOT NULL CHECK (user_role IN ('Manager', 'Employee')),
+    manager_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL
+);
+
+-- Table for Goals
+-- Each goal is assigned to a specific employee and set by a manager.
+CREATE TABLE goals (
+    goal_id SERIAL PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    due_date DATE NOT NULL,
+    status VARCHAR(50) NOT NULL CHECK (status IN ('Draft', 'In Progress', 'Completed', 'Cancelled')),
+    employee_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+    manager_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL
+);
+
+-- Table for Tasks
+-- Tasks are the actionable steps taken to achieve a goal.
+CREATE TABLE tasks (
+    task_id SERIAL PRIMARY KEY,
+    description TEXT NOT NULL,
+    status VARCHAR(50) NOT NULL CHECK (status IN ('Pending', 'In Progress', 'Completed', 'Approved', 'Rejected')),
+    goal_id INTEGER REFERENCES goals(goal_id) ON DELETE CASCADE,
+    employee_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- Table for Feedback
+-- This table stores performance feedback given by managers.
+CREATE TABLE feedback (
+    feedback_id SERIAL PRIMARY KEY,
+    manager_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
+    employee_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+    goal_id INTEGER REFERENCES goals(goal_id) ON DELETE CASCADE,
+    feedback_text TEXT NOT NULL,
+    feedback_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Stored Function for Automated Feedback
+-- This function can be used to generate automated feedback messages based on goal completion.
+CREATE OR REPLACE FUNCTION generate_automated_feedback()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'Completed' AND OLD.status != 'Completed' THEN
+        INSERT INTO feedback (manager_id, employee_id, goal_id, feedback_text)
+        VALUES (
+            NEW.manager_id,
+            NEW.employee_id,
+            NEW.goal_id,
+            'Automated feedback: Goal "' || NEW.title || '" has been marked as Completed. Congratulations on achieving your goal!'
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger for Automated Feedback
+-- This trigger will automatically call the function when a goal's status is updated to 'Completed'.
+CREATE TRIGGER goal_status_update_trigger
+AFTER UPDATE ON goals
+FOR EACH ROW
+EXECUTE FUNCTION generate_automated_feedback();
+-- Insert Manager and Employee Users
+INSERT INTO users (full_name, email, user_role, manager_id) VALUES
+('Alex Johnson', 'alex.j@example.com', 'Manager', NULL),
+('Maria Garcia', 'maria.g@example.com', 'Manager', NULL),
+('John Doe', 'john.d@example.com', 'Employee', 1), -- John reports to Alex
+('Jane Smith', 'jane.s@example.com', 'Employee', 1), -- Jane reports to Alex
+('Bob Williams', 'bob.w@example.com', 'Employee', 2), -- Bob reports to Maria
+('Alice Brown', 'alice.b@example.com', 'Employee', 2); -- Alice reports to Maria
+
+-- Insert Goals for Employees
+INSERT INTO goals (title, description, due_date, status, employee_id, manager_id) VALUES
+('Complete Q4 Sales Report', 'Analyze and summarize all sales data for the fourth quarter.', '2025-12-31', 'In Progress', 3, 1),
+('Learn Python for Data Analysis', 'Complete the online course on advanced Python for data science.', '2025-11-15', 'In Progress', 4, 1),
+('Improve Customer Satisfaction Score', 'Aim to raise the average customer satisfaction score from 85% to 90%.', '2025-10-31', 'Completed', 5, 2),
+('Migrate Database to Cloud', 'Successfully move the legacy database system to a cloud-based platform.', '2025-12-20', 'Draft', 6, 2);
+
+-- Insert Tasks for Goals
+INSERT INTO tasks (description, status, goal_id, employee_id) VALUES
+('Collect raw sales data from all regions.', 'Completed', 1, 3),
+('Clean and preprocess the sales data.', 'In Progress', 1, 3),
+('Visualize key metrics in a dashboard.', 'Pending', 1, 3),
+('Complete Module 1: Pandas basics.', 'Completed', 2, 4),
+('Complete Module 2: Matplotlib and Seaborn.', 'In Progress', 2, 4),
+('Collect and analyze feedback from customers.', 'Completed', 3, 5),
+('Implement new feedback collection methods.', 'Completed', 3, 5);
+
+-- Insert Feedback for Goals
+INSERT INTO feedback (manager_id, employee_id, goal_id, feedback_text) VALUES
+(1, 4, 2, 'Great progress on the Python course. Keep up the good work!'),
+(2, 5, 3, 'Excellent work on improving the customer satisfaction score. The team is very impressed with your efforts.');
