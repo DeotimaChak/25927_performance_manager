@@ -1,0 +1,146 @@
+# backend.py
+import psycopg2
+import os
+import pandas as pd
+from contextlib import contextmanager
+
+# --- 1. Database Configuration and Connection ---
+DB_NAME = os.getenv("DB_NAME", "Performance_management")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "E!ght21")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+
+@contextmanager
+def get_db_connection():
+    """Provides a safe database connection using a context manager."""
+    conn = None
+    try:
+        conn = psycopg2.connect(dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT)
+        yield conn
+    except psycopg2.Error as e:
+        print(f"Database connection failed: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+def setup_database():
+    """Sets up all necessary tables in the database if they don't exist."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                commands = [
+                    """CREATE TABLE IF NOT EXISTS users (user_id SERIAL PRIMARY KEY, full_name VARCHAR(255) NOT NULL, email VARCHAR(255) NOT NULL UNIQUE, user_role VARCHAR(50) NOT NULL CHECK (user_role IN ('Manager', 'Employee')), manager_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL);""",
+                    """CREATE TABLE IF NOT EXISTS goals (goal_id SERIAL PRIMARY KEY, title VARCHAR(255) NOT NULL, description TEXT, due_date DATE NOT NULL, status VARCHAR(50) NOT NULL CHECK (status IN ('Draft', 'In Progress', 'Completed', 'Cancelled')), employee_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE, manager_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL);""",
+                    """CREATE TABLE IF NOT EXISTS tasks (task_id SERIAL PRIMARY KEY, description TEXT NOT NULL, status VARCHAR(50) NOT NULL CHECK (status IN ('Pending', 'In Progress', 'Completed', 'Approved', 'Rejected')), goal_id INTEGER REFERENCES goals(goal_id) ON DELETE CASCADE, employee_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE);""",
+                    """CREATE TABLE IF NOT EXISTS feedback (feedback_id SERIAL PRIMARY KEY, manager_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL, employee_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE, goal_id INTEGER REFERENCES goals(goal_id) ON DELETE CASCADE, feedback_text TEXT NOT NULL, feedback_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);""",
+                    """CREATE OR REPLACE FUNCTION generate_automated_feedback() RETURNS TRIGGER AS $$ BEGIN IF NEW.status = 'Completed' AND OLD.status != 'Completed' THEN INSERT INTO feedback (manager_id, employee_id, goal_id, feedback_text) VALUES ( NEW.manager_id, NEW.employee_id, NEW.goal_id, 'Automated feedback: Goal "' || NEW.title || '" has been marked as Completed. Congratulations on achieving your goal!'); END IF; RETURN NEW; END; $$ LANGUAGE plpgsql;""",
+                    """DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'goal_status_update_trigger') THEN CREATE TRIGGER goal_status_update_trigger AFTER UPDATE ON goals FOR EACH ROW EXECUTE FUNCTION generate_automated_feedback(); END IF; END $$;"""
+                ]
+                for command in commands:
+                    cur.execute(command)
+                conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error setting up database: {e}")
+        return False
+
+# --- 2. Backend CRUD Functions ---
+
+# User Management (CRUD)
+def get_users_by_role(role):
+    with get_db_connection() as conn:
+        df = pd.read_sql_query("SELECT user_id, full_name FROM users WHERE user_role = %s;", conn, params=(role,))
+        return df
+
+def get_employee_goals(employee_id):
+    with get_db_connection() as conn:
+        df = pd.read_sql_query("SELECT g.goal_id, g.title, g.description, g.due_date, g.status, u.full_name AS manager_name FROM goals g JOIN users u ON g.manager_id = u.user_id WHERE g.employee_id = %s ORDER BY g.due_date DESC;", conn, params=(employee_id,))
+        return df
+
+def get_manager_employees(manager_id):
+    with get_db_connection() as conn:
+        df = pd.read_sql_query("SELECT user_id, full_name FROM users WHERE manager_id = %s;", conn, params=(manager_id,))
+        return df
+
+# Goal Management (CRUD)
+def create_goal(goal_data):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO goals (title, description, due_date, status, employee_id, manager_id) VALUES (%s, %s, %s, %s, %s, %s) RETURNING goal_id;",
+                (goal_data['title'], goal_data['description'], goal_data['due_date'], goal_data['status'], goal_data['employee_id'], goal_data['manager_id'])
+            )
+            goal_id = cur.fetchone()[0]
+            conn.commit()
+            return goal_id
+
+def update_goal_status(goal_id, new_status):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE goals SET status = %s WHERE goal_id = %s;", (new_status, goal_id))
+            conn.commit()
+
+# Task Management (CRUD)
+def create_task(task_data):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO tasks (description, status, goal_id, employee_id) VALUES (%s, %s, %s, %s);",
+                (task_data['description'], task_data['status'], task_data['goal_id'], task_data['employee_id'])
+            )
+            conn.commit()
+
+def get_tasks_by_goal(goal_id):
+    with get_db_connection() as conn:
+        df = pd.read_sql_query("SELECT task_id, description, status FROM tasks WHERE goal_id = %s;", conn, params=(goal_id,))
+        return df
+
+def update_task_status(task_id, new_status):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE tasks SET status = %s WHERE task_id = %s;", (new_status, task_id))
+            conn.commit()
+
+# Feedback Management (CRUD)
+def get_feedback_by_employee_and_goal(employee_id, goal_id):
+    with get_db_connection() as conn:
+        df = pd.read_sql_query("SELECT feedback_text, feedback_date FROM feedback WHERE employee_id = %s AND goal_id = %s ORDER BY feedback_date DESC;", conn, params=(employee_id, goal_id))
+        return df
+
+def create_feedback(feedback_data):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO feedback (manager_id, employee_id, goal_id, feedback_text) VALUES (%s, %s, %s, %s);",
+                (feedback_data['manager_id'], feedback_data['employee_id'], feedback_data['goal_id'], feedback_data['feedback_text'])
+            )
+            conn.commit()
+
+# --- 3. Business Insights Functions ---
+def get_insights():
+    with get_db_connection() as conn:
+        insights = {}
+        with conn.cursor() as cur:
+            # COUNT: Total number of goals and completed goals
+            cur.execute("SELECT COUNT(*) FROM goals;")
+            insights['total_goals'] = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM goals WHERE status = 'Completed';")
+            insights['completed_goals'] = cur.fetchone()[0]
+
+            # AVG: Average number of tasks per completed goal
+            cur.execute("SELECT AVG(task_count) FROM (SELECT COUNT(*) AS task_count FROM tasks t JOIN goals g ON t.goal_id = g.goal_id WHERE g.status = 'Completed' GROUP BY g.goal_id) AS subquery;")
+            insights['avg_tasks_per_completed_goal'] = cur.fetchone()[0]
+            
+            # MIN & MAX: Time to complete a goal
+            cur.execute("SELECT MIN(EXTRACT(DAY FROM AGE(now(), created_date))) FROM goals WHERE status = 'Completed';")
+            insights['min_completion_time'] = cur.fetchone()[0]
+            cur.execute("SELECT MAX(EXTRACT(DAY FROM AGE(now(), created_date))) FROM goals WHERE status = 'Completed';")
+            insights['max_completion_time'] = cur.fetchone()[0]
+
+            # SUM: Total number of tasks
+            cur.execute("SELECT COUNT(*) FROM tasks;")
+            insights['total_tasks'] = cur.fetchone()[0]
+
+        return insights
